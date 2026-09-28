@@ -24,6 +24,8 @@ var ToolRegistry = []ToolInfo{
 	{Name: "subagent", Summary: "Spawn a subagent conversation.", DefaultOn: true, SourcePath: "claudetool/subagent.go"},
 	{Name: "llm_one_shot", Summary: "One-shot prompt to another LLM.", DefaultOn: true, SourcePath: "claudetool/llm_one_shot.go"},
 	{Name: "browser", Summary: "Browser automation (navigate, eval, screenshot, emulate, network, accessibility, profile).", DefaultOn: true, SourcePath: "claudetool/browse/browse.go"},
+	{Name: "web_search", Summary: "Search the public web with Brave Search.", DefaultOn: true, SourcePath: "claudetool/webtools.go"},
+	{Name: "web_fetch", Summary: "Safely fetch and extract a public web page.", DefaultOn: true, SourcePath: "claudetool/webtools.go"},
 	{Name: "read_image", Summary: "Read an image file for the model.", DefaultOn: true, SourcePath: "claudetool/browse/browse.go"},
 }
 

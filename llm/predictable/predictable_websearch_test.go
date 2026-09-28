@@ -74,3 +74,21 @@ func TestPredictableWebSearchCitations(t *testing.T) {
 		})
 	}
 }
+
+func TestPredictableToolSmorgasbordIncludesWebTools(t *testing.T) {
+	resp, err := NewService().Do(t.Context(), &llm.Request{Messages: []llm.Message{{Role: llm.MessageRoleUser, Content: []llm.Content{{Type: llm.ContentTypeText, Text: "tool smorgasbord"}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]bool{}
+	for _, content := range resp.Content {
+		if content.Type == llm.ContentTypeToolUse {
+			found[content.ToolName] = true
+		}
+	}
+	for _, name := range []string{"web_search", "web_fetch"} {
+		if !found[name] {
+			t.Errorf("predictable tool smorgasbord missing %s", name)
+		}
+	}
+}

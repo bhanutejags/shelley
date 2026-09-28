@@ -298,13 +298,10 @@ func NewToolSet(ctx context.Context, cfg ToolSetConfig) *ToolSet {
 		cleanup = browserCleanup
 	}
 
-	// Add server-side tools (e.g., web search for Anthropic models, or for
-	// OpenAI's Responses API).
-	if cfg.LLMProvider != nil && cfg.ModelID != "" {
-		if svc, err := cfg.LLMProvider.GetService(cfg.ModelID); err == nil {
-			tools = append(tools, serverSideTools(svc)...)
-		}
-	}
+	// Shelley owns web search so it consistently uses Brave rather than
+	// silently switching to provider-specific search infrastructure.
+	web := newWebTools()
+	tools = append(tools, webSearchTool(web), webFetchTool(web))
 
 	tools = FilterTools(tools, cfg.ToolOverrides, cfg.DisableAllTools)
 	return &ToolSet{

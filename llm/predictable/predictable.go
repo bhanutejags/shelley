@@ -977,6 +977,11 @@ func (s *Service) makeToolSmorgasbordResponse(inputTokens uint64) *llm.Response 
 		ToolInput: json.RawMessage(patchInput),
 	})
 
+	searchInput, _ := json.Marshal(map[string]string{"query": "Shelley predictable web search fixture"})
+	content = append(content, llm.Content{ID: fmt.Sprintf("tool_search_%d", (baseNano+1)%1000), Type: llm.ContentTypeToolUse, ToolName: "web_search", ToolInput: json.RawMessage(searchInput)})
+	fetchInput, _ := json.Marshal(map[string]string{"url": "https://example.invalid/fixture"})
+	content = append(content, llm.Content{ID: fmt.Sprintf("tool_fetch_%d", (baseNano+4)%1000), Type: llm.ContentTypeToolUse, ToolName: "web_fetch", ToolInput: json.RawMessage(fetchInput)})
+
 	// browser: screenshot action
 	screenshotInput, _ := json.Marshal(map[string]string{"action": "screenshot"})
 	content = append(content, llm.Content{
