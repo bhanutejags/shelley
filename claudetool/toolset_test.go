@@ -440,162 +440,22 @@ func (p *plainAnthropicProvider) GetWorkhorseService(modelID string) (llm.Servic
 	return p.GetService(modelID)
 }
 
-func TestNewToolSet_WebSearchForAnthropicModels(t *testing.T) {
-	provider := &mockLLMProviderWithProviders{
-		providers: map[string]string{
-			"claude-sonnet-4.5": "anthropic",
-			"claude-opus-4.6":   "anthropic",
-			"claude-haiku-4.5":  "anthropic",
-			"gpt-5.3-codex":     "openai",
-		},
-	}
-
-	hasWebSearchToolOfType := func(ts *ToolSet, toolType string) bool {
+func TestNewToolSet_WebSearchAndFetch(t *testing.T) {
+	for _, cfg := range []ToolSetConfig{{ModelID: "claude-sonnet-4.5"}, {ModelID: "gpt-5.3-codex"}, {ModelID: "plain-chat"}, {}} {
+		ts := NewToolSet(t.Context(), cfg)
+		found := map[string]*llm.Tool{}
 		for _, tool := range ts.Tools() {
-			if tool.Name == "web_search" && tool.Type == toolType {
-				return true
+			if tool.Name == "web_search" || tool.Name == "web_fetch" {
+				found[tool.Name] = tool
 			}
 		}
-		return false
+		for _, name := range []string{"web_search", "web_fetch"} {
+			tool := found[name]
+			if tool == nil || tool.Run == nil || len(tool.InputSchema) == 0 || tool.ServerSide {
+				t.Errorf("%s should be a local schema-backed tool for model %q: %+v", name, cfg.ModelID, tool)
+			}
+		}
 	}
-	hasWebSearchTool := func(ts *ToolSet) bool {
-		for _, tool := range ts.Tools() {
-			if tool.Name == "web_search" {
-				return true
-			}
-		}
-		return false
-	}
-
-	// Anthropic models should have the Anthropic-flavored web_search tool
-	for _, modelID := range []string{"claude-sonnet-4.5", "claude-opus-4.6", "claude-haiku-4.5"} {
-		t.Run(modelID+" has web_search", func(t *testing.T) {
-			cfg := ToolSetConfig{
-				LLMProvider: provider,
-				ModelID:     modelID,
-				WorkingDir:  "/test",
-			}
-			ts := NewToolSet(t.Context(), cfg)
-			if !hasWebSearchToolOfType(ts, "web_search_20250305") {
-				t.Errorf("expected anthropic web_search tool for %s", modelID)
-			}
-		})
-	}
-
-	// OpenAI models should have the OpenAI-flavored web_search tool (only
-	// when the service is the Responses-API-backed one).
-	t.Run("openai responses has web_search", func(t *testing.T) {
-		cfg := ToolSetConfig{
-			LLMProvider: provider,
-			ModelID:     "gpt-5.3-codex",
-			WorkingDir:  "/test",
-		}
-		ts := NewToolSet(t.Context(), cfg)
-		if !hasWebSearchToolOfType(ts, "web_search") {
-			t.Error("expected web_search tool for OpenAI Responses model")
-		}
-	})
-
-	// OpenAI-compatible Chat Completions services (which don't support web
-	// search) should NOT get a web_search tool.
-	t.Run("openai chat-completions service has no web_search", func(t *testing.T) {
-		// Build a provider that returns a plain openai service WITHOUT the
-		// ServerSideWebSearchCapable marker interface.
-		plainProvider := &plainOpenAIProvider{}
-		cfg := ToolSetConfig{
-			LLMProvider: plainProvider,
-			ModelID:     "openai-chat",
-			WorkingDir:  "/test",
-		}
-		ts := NewToolSet(t.Context(), cfg)
-		if hasWebSearchTool(ts) {
-			t.Error("expected no web_search tool for a chat-completions openai service")
-		}
-	})
-
-	// A non-Claude model reached over the Anthropic Messages wire protocol
-	// (e.g. a third-party model an LLM integration serves via anthropic_messages)
-	// reports provider "anthropic" but cannot run the Anthropic server-side
-	// web_search tool. Sending it would produce a 400 Bad Request (issue #242),
-	// so it must NOT get a web_search tool.
-	t.Run("anthropic-protocol non-claude service has no web_search", func(t *testing.T) {
-		cfg := ToolSetConfig{
-			LLMProvider: &plainAnthropicProvider{},
-			ModelID:     "third-party-model",
-			WorkingDir:  "/test",
-		}
-		ts := NewToolSet(t.Context(), cfg)
-		if hasWebSearchTool(ts) {
-			t.Error("expected no web_search tool for a non-Claude anthropic-protocol service")
-		}
-	})
-
-	// Unknown model should NOT have web_search tool
-	t.Run("unknown model has no web_search", func(t *testing.T) {
-		cfg := ToolSetConfig{
-			LLMProvider: provider,
-			ModelID:     "unknown-model",
-			WorkingDir:  "/test",
-		}
-		ts := NewToolSet(t.Context(), cfg)
-		if hasWebSearchTool(ts) {
-			t.Error("expected no web_search tool for unknown model")
-		}
-	})
-
-	// Empty model should NOT have web_search tool
-	t.Run("empty model has no web_search", func(t *testing.T) {
-		cfg := ToolSetConfig{
-			LLMProvider: provider,
-			ModelID:     "",
-			WorkingDir:  "/test",
-		}
-		ts := NewToolSet(t.Context(), cfg)
-		if hasWebSearchTool(ts) {
-			t.Error("expected no web_search tool for empty model ID")
-		}
-	})
-
-	// Nil LLMProvider should NOT have web_search tool
-	t.Run("nil provider has no web_search", func(t *testing.T) {
-		cfg := ToolSetConfig{
-			LLMProvider: nil,
-			ModelID:     "claude-sonnet-4.5",
-			WorkingDir:  "/test",
-		}
-		ts := NewToolSet(t.Context(), cfg)
-		if hasWebSearchTool(ts) {
-			t.Error("expected no web_search tool with nil provider")
-		}
-	})
-
-	// Server-side tool should have no Run function, no InputSchema, no Description
-	t.Run("web_search tool properties", func(t *testing.T) {
-		cfg := ToolSetConfig{
-			LLMProvider: provider,
-			ModelID:     "claude-sonnet-4.5",
-			WorkingDir:  "/test",
-		}
-		ts := NewToolSet(t.Context(), cfg)
-		for _, tool := range ts.Tools() {
-			if tool.Name == "web_search" {
-				if tool.Run != nil {
-					t.Error("server-side tool should have nil Run function")
-				}
-				if tool.InputSchema != nil {
-					t.Error("server-side tool should have nil InputSchema")
-				}
-				if tool.Description != "" {
-					t.Error("server-side tool should have empty Description")
-				}
-				if !tool.ServerSide {
-					t.Error("server-side tool should have ServerSide=true")
-				}
-				return
-			}
-		}
-		t.Error("web_search tool not found")
-	})
 }
 
 type rawPatchService struct{ mockService }

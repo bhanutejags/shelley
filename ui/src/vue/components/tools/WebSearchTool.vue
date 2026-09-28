@@ -50,6 +50,7 @@
           </a>
           <div class="web-search-result-meta">
             <span class="web-search-result-url">{{ result.URL || "" }}</span>
+            <span v-if="result.Text" class="web-search-result-description">{{ result.Text }}</span>
             <span v-if="result.PageAge" class="web-search-result-age">{{ result.PageAge }}</span>
           </div>
         </div>
@@ -88,7 +89,19 @@ const queries = computed(() => {
   return values.filter((value) => value.trim() !== "");
 });
 
-const results = computed<LLMContent[]>(() => props.searchResults || props.toolResult || []);
+const results = computed<LLMContent[]>(() => {
+  if (props.searchResults?.length) return props.searchResults;
+  const raw = props.toolResult?.find((item) => item.Type === 2)?.Text;
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as { results?: Array<{ title?: string; url?: string; description?: string }> };
+      if (Array.isArray(parsed.results)) {
+        return parsed.results.map((item) => ({ Type: 9, Title: item.title || "", URL: item.url || "", Text: item.description || "" } as LLMContent));
+      }
+    } catch { /* A provider-native result is rendered from its structured content instead. */ }
+  }
+  return props.toolResult || [];
+});
 // OpenAI's server-side search doesn't deliver structured results to us;
 // the citations are attached to the assistant's message text instead.
 // So "complete with 0 results" is normal for OpenAI — only mark running

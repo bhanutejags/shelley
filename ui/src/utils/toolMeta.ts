@@ -83,6 +83,8 @@ export function toolEmoji(name: string | undefined | null, input?: unknown): str
       return "✨";
     case "web_search":
       return "🔎";
+    case "web_fetch":
+      return "🌐";
     default:
       return "⚙️";
   }
@@ -375,6 +377,8 @@ function inputSummary(name: string | undefined | null, input: unknown): string {
     case "keyword_search":
     case "web_search":
       return pick("query");
+    case "web_fetch":
+      return pick("url");
     case "subagent":
       return pick("slug", "prompt");
     case "message_parent":

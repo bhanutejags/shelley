@@ -148,6 +148,7 @@ import SubagentTool from "./tools/SubagentTool.vue";
 import LLMOneShotTool from "./tools/LLMOneShotTool.vue";
 import OutputIframeTool from "./tools/OutputIframeTool.vue";
 import WebSearchTool from "./tools/WebSearchTool.vue";
+import WebFetchTool from "./tools/WebFetchTool.vue";
 import { toolCardPlaceholderKind } from "./toolCardMount";
 import { MESSAGE_USER_TOOL } from "../../utils/conversationView";
 
@@ -216,6 +217,7 @@ const TOOL_COMPONENTS: Record<string, any> = {
   browser_accessibility: BrowserAccessibilityTool,
   browser_profile: BrowserProfileTool,
   web_search: WebSearchTool,
+  web_fetch: WebFetchTool,
   browser_take_screenshot: ScreenshotTool,
   browser_navigate: BrowserNavigateTool,
   browser_eval: BrowserEvalTool,
