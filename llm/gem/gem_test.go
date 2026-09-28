@@ -115,6 +115,17 @@ func TestMaxOutputTokensCeiling(t *testing.T) {
 	}
 }
 
+func TestLocalWebSearchIsSerializedAsCallableFunction(t *testing.T) {
+	tool := &llm.Tool{Name: "web_search", Description: "Search using Shelley's Brave integration", InputSchema: llm.MustSchema(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`)}
+	decls, err := convertToolSchemas([]*llm.Tool{tool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decls) != 1 || decls[0].Name != "web_search" || decls[0].Parameters.Type != 6 {
+		t.Fatalf("Gemini declarations = %+v, want callable schema-backed function", decls)
+	}
+}
+
 func TestConvertToolSchemas(t *testing.T) {
 	// Create a simple tool with a JSON schema
 	schema := `{

@@ -851,6 +851,18 @@ func TestServerSideToolsFilteredFromOAIRequest(t *testing.T) {
 	}
 }
 
+func TestLocalWebSearchIsSerializedAsFunction(t *testing.T) {
+	tool := &llm.Tool{Name: "web_search", Description: "Search using Shelley's Brave integration", InputSchema: llm.MustSchema(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`), Run: func(context.Context, json.RawMessage) llm.ToolOut { return llm.ToolOut{} }}
+	chat := fromLLMTool(tool)
+	if chat.Type != openai.ToolTypeFunction || chat.Function == nil || chat.Function.Name != "web_search" || chat.Function.Parameters == nil {
+		t.Fatalf("Chat Completions tool = %+v, want callable function", chat)
+	}
+	responses := fromLLMToolResponses(tool)
+	if responses.Type != "function" || responses.Name != "web_search" || len(responses.Parameters) == 0 {
+		t.Fatalf("Responses tool = %+v, want callable function, not built-in web search", responses)
+	}
+}
+
 func TestFromLLMTool(t *testing.T) {
 	tool := &llm.Tool{
 		Name:        "get_weather",

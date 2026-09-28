@@ -3,6 +3,7 @@ package claudetool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/netip"
@@ -56,6 +57,24 @@ func TestBraveSearchUsesFixedIntegrationWithoutForwardingCredentials(t *testing.
 	}
 }
 
+func TestBraveSearchDoesNotFollowRedirects(t *testing.T) {
+	requests := 0
+	tools := &webTools{braveURL: "https://brave.int.example.test/res/v1/web/search", client: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests++
+		if r.URL.Host != "brave.int.example.test" {
+			t.Fatalf("request went to unexpected host %q", r.URL.Host)
+		}
+		return response(http.StatusFound, "", map[string]string{"Location": "https://elsewhere.example/search?token=secret"}), nil
+	})}}
+	out := tools.search(t.Context(), webSearchInput{Query: "query"})
+	if out.Error == nil || !strings.Contains(out.Error.Error(), "redirects are not followed") || strings.Contains(out.Error.Error(), "secret") {
+		t.Fatalf("redirect error = %v", out.Error)
+	}
+	if requests != 1 {
+		t.Fatalf("request count = %d, want only fixed integration host", requests)
+	}
+}
+
 func TestBraveSearchIntegrationErrorsAndCancellation(t *testing.T) {
 	if got := outputText((&webTools{}).search(t.Context(), webSearchInput{Query: "test"})); !strings.Contains(got, "attach the personal Brave integration") {
 		t.Fatalf("missing integration error = %q", got)
@@ -64,6 +83,13 @@ func TestBraveSearchIntegrationErrorsAndCancellation(t *testing.T) {
 	out := tools.search(t.Context(), webSearchInput{Query: "test"})
 	if out.Error == nil || strings.Contains(out.Error.Error(), "credential-redacted") {
 		t.Fatalf("integration error leaked response: %v", out.Error)
+	}
+	tools.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return nil, errors.New("upstream failed for " + r.URL.String())
+	})}
+	out = tools.search(t.Context(), webSearchInput{Query: "token secret"})
+	if out.Error == nil || !strings.Contains(out.Error.Error(), "upstream failed") || strings.Contains(out.Error.Error(), "token+secret") {
+		t.Fatalf("redacted request failure = %v", out.Error)
 	}
 	tools.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) { return nil, r.Context().Err() })}
 	ctx, cancel := context.WithCancel(t.Context())
@@ -83,10 +109,24 @@ func TestSafePublicURL(t *testing.T) {
 	if _, err := safePublicURL("https://example.org/a?token=secret"); err != nil {
 		t.Fatal(err)
 	}
-	for _, raw := range []string{"127.0.0.1", "10.0.0.1", "169.254.169.254", "192.168.1.1", "::1", "fc00::1", "100.64.0.1", "192.0.0.1", "198.18.0.1", "2001:db8::1", "2606:4700:4700::1111"} {
-		ip := netip.MustParseAddr(raw)
-		if publicIP(ip) != (raw == "2606:4700:4700::1111") {
-			t.Errorf("publicIP(%s) = %v", raw, publicIP(ip))
+	for _, tt := range []struct {
+		ip     string
+		public bool
+	}{
+		{"127.0.0.1", false}, {"10.0.0.1", false}, {"169.254.169.254", false},
+		{"192.168.1.1", false}, {"::1", false}, {"fc00::1", false},
+		{"100.64.0.1", false}, {"192.0.0.1", false}, {"192.0.2.1", false},
+		{"198.18.0.1", false}, {"198.51.100.1", false}, {"203.0.113.1", false},
+		{"240.0.0.1", false}, {"::ffff:169.254.169.254", false}, {"::ffff:8.8.8.8", true},
+		{"64:ff9b::a9fe:a9fe", false}, {"64:ff9b:1::a9fe:a9fe", false},
+		{"2002:a9fe:a9fe::1", false}, {"2001:0000:a9fe:a9fe::1", false},
+		{"::a9fe:a9fe", false}, {"2606:4700:4700:0:0:5efe:a9fe:a9fe", false},
+		{"2001:db8::1", false}, {"3fff::1", false},
+		{"2606:4700:4700::1111", true}, {"8.8.8.8", true},
+	} {
+		ip := netip.MustParseAddr(tt.ip)
+		if got := publicIP(ip); got != tt.public {
+			t.Errorf("publicIP(%s) = %v, want %v", tt.ip, got, tt.public)
 		}
 	}
 }
@@ -119,8 +159,22 @@ func TestWebFetchExtractionBoundsAndRedirects(t *testing.T) {
 	})}
 	out = tools.fetch(t.Context(), webFetchInput{URL: "https://example.org/long"})
 	var page fetchedPage
-	if err := json.Unmarshal([]byte(outputText(out)), &page); err != nil || len(page.Text) != maxFetchText {
-		t.Fatalf("bounded output length = %d, error = %v", len(page.Text), err)
+	if err := json.Unmarshal([]byte(outputText(out)), &page); err != nil || len([]rune(page.Text)) != maxFetchText || !page.Truncated || !strings.HasSuffix(page.Text, "x") {
+		t.Fatalf("bounded output length = %d, truncated = %v, error = %v", len([]rune(page.Text)), page.Truncated, err)
+	}
+	tools.client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return response(200, strings.Repeat("é", maxFetchText-1), map[string]string{"Content-Type": "text/plain"}), nil
+	})}
+	out = tools.fetch(t.Context(), webFetchInput{URL: "https://example.org/multibyte"})
+	if err := json.Unmarshal([]byte(outputText(out)), &page); err != nil || len([]rune(page.Text)) != maxFetchText-1 || page.Truncated || !strings.HasSuffix(page.Text, "é") {
+		t.Fatalf("short multibyte output length = %d, truncated = %v, error = %v", len([]rune(page.Text)), page.Truncated, err)
+	}
+	tools.client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return response(200, strings.Repeat("é", maxFetchText+1), map[string]string{"Content-Type": "text/plain"}), nil
+	})}
+	out = tools.fetch(t.Context(), webFetchInput{URL: "https://example.org/multibyte-long"})
+	if err := json.Unmarshal([]byte(outputText(out)), &page); err != nil || len([]rune(page.Text)) != maxFetchText || !page.Truncated || !strings.HasSuffix(page.Text, "é") {
+		t.Fatalf("multibyte capped output length = %d, truncated = %v, error = %v", len([]rune(page.Text)), page.Truncated, err)
 	}
 }
 

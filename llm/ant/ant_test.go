@@ -627,6 +627,14 @@ func TestAdaptiveThinkingOmitsForcedToolChoice(t *testing.T) {
 	}
 }
 
+func TestLocalWebSearchIsSerializedAsCallableTool(t *testing.T) {
+	tool := &llm.Tool{Name: "web_search", Description: "Search using Shelley's Brave integration", InputSchema: llm.MustSchema(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`), Run: func(context.Context, json.RawMessage) llm.ToolOut { return llm.ToolOut{} }}
+	got := fromLLMTool(tool)
+	if got.Name != "web_search" || got.Type != "" || len(got.InputSchema) == 0 {
+		t.Fatalf("Anthropic tool = %+v, want callable schema-backed tool, not provider web_search", got)
+	}
+}
+
 func TestFromLLMTool(t *testing.T) {
 	tool := &llm.Tool{
 		Name:        "bash",
