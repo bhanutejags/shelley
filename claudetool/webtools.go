@@ -49,9 +49,10 @@ type webResults struct {
 	Results []braveResult `json:"results"`
 }
 type fetchedPage struct {
-	URL   string `json:"url"`
-	Title string `json:"title"`
-	Text  string `json:"text"`
+	URL       string `json:"url"`
+	Title     string `json:"title"`
+	Text      string `json:"text"`
+	Truncated bool   `json:"truncated"`
 }
 
 type webTools struct {
@@ -98,11 +99,19 @@ func (t *webTools) search(ctx context.Context, in webSearchInput) llm.ToolOut {
 	if client == nil {
 		client = &http.Client{Timeout: 12 * time.Second, Transport: &http.Transport{Proxy: nil}}
 	}
-	resp, err := client.Do(req)
+	clientCopy := *client
+	clientCopy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := clientCopy.Do(req)
 	if err != nil {
-		return llm.ErrorfToolOut("Brave search request failed: %w", err)
+		if ctx.Err() != nil {
+			return llm.ErrorfToolOut("Brave search request canceled: %w", ctx.Err())
+		}
+		return llm.ErrorfToolOut("Brave search request failed: %w", scrubURLFromError(err, req.URL))
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return llm.ErrorfToolOut("Brave Search integration returned HTTP %d; redirects are not followed", resp.StatusCode)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
 			return llm.ErrorfToolOut("Brave Search integration returned HTTP %d; attach the personal Brave integration to this exe.dev VM", resp.StatusCode)
@@ -187,10 +196,12 @@ func (t *webTools) fetch(ctx context.Context, in webFetchInput) llm.ToolOut {
 			return llm.ErrorfToolOut("web_fetch supports HTML and plain text responses only")
 		}
 		text, title := extractPage(body, strings.Contains(mediaType, "html") || strings.Contains(mediaType, "xhtml"))
-		if len(text) > maxFetchText {
-			text = text[:maxFetchText]
+		runes := []rune(text)
+		truncated := len(runes) > maxFetchText
+		if truncated {
+			text = string(runes[:maxFetchText])
 		}
-		return webToolOut(fetchedPage{URL: u.Scheme + "://" + u.Host + u.Path, Title: title, Text: text})
+		return webToolOut(fetchedPage{URL: u.Scheme + "://" + u.Host + u.Path, Title: title, Text: text, Truncated: truncated})
 	}
 	return llm.ErrorfToolOut("web_fetch exceeded redirect limit")
 }
@@ -256,7 +267,29 @@ func publicIP(ip netip.Addr) bool {
 	if !ip.IsValid() || !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalMulticast() {
 		return false
 	}
-	for _, prefix := range []netip.Prefix{netip.MustParsePrefix("100.64.0.0/10"), netip.MustParsePrefix("192.0.0.0/24"), netip.MustParsePrefix("198.18.0.0/15"), netip.MustParsePrefix("2001:db8::/32")} {
+	var blocked []netip.Prefix
+	if ip.Is4() {
+		blocked = []netip.Prefix{
+			netip.MustParsePrefix("0.0.0.0/8"), netip.MustParsePrefix("100.64.0.0/10"),
+			netip.MustParsePrefix("192.0.0.0/24"), netip.MustParsePrefix("192.0.2.0/24"),
+			netip.MustParsePrefix("192.88.99.0/24"), netip.MustParsePrefix("198.18.0.0/15"),
+			netip.MustParsePrefix("198.51.100.0/24"), netip.MustParsePrefix("203.0.113.0/24"),
+			netip.MustParsePrefix("240.0.0.0/4"),
+		}
+	} else {
+		blocked = []netip.Prefix{
+			netip.MustParsePrefix("::/96"), netip.MustParsePrefix("64:ff9b::/96"),
+			netip.MustParsePrefix("64:ff9b:1::/48"), netip.MustParsePrefix("2001::/23"),
+			netip.MustParsePrefix("2002::/16"), netip.MustParsePrefix("2001:db8::/32"),
+			netip.MustParsePrefix("3fff::/20"),
+		}
+		bytes := ip.As16()
+		isatapID := (bytes[8] == 0x00 && bytes[9] == 0x00 || bytes[8] == 0x02 && bytes[9] == 0x00) && bytes[10] == 0x5e && bytes[11] == 0xfe
+		if isatapID && !publicIP(netip.AddrFrom4([4]byte{bytes[12], bytes[13], bytes[14], bytes[15]})) {
+			return false
+		}
+	}
+	for _, prefix := range blocked {
 		if prefix.Contains(ip) {
 			return false
 		}
@@ -313,5 +346,5 @@ func webSearchTool(tools *webTools) *llm.Tool {
 	return &llm.Tool{Name: "web_search", Description: "Search the public web with Brave Search through the exe.dev personal Brave integration. Attach that integration to the VM; credentials stay in exe.dev's integration proxy.", InputSchema: llm.MustSchema(`{"type":"object","properties":{"query":{"type":"string","description":"Search query"}},"required":["query"],"additionalProperties":false}`), Run: llm.RunJSON(tools.search)}
 }
 func webFetchTool(tools *webTools) *llm.Tool {
-	return &llm.Tool{Name: "web_fetch", Description: "Fetch and extract readable text from a public HTTP(S) page. Rejects private/internal addresses, credentials, nonstandard ports, and unsafe redirects. HTML/plain-text only; 1 MiB response and 20,000-character output limit.", InputSchema: llm.MustSchema(`{"type":"object","properties":{"url":{"type":"string","description":"Public HTTP or HTTPS URL"}},"required":["url"],"additionalProperties":false}`), Run: llm.RunJSON(tools.fetch)}
+	return &llm.Tool{Name: "web_fetch", Description: "Fetch and extract readable text from a public HTTP(S) page. Rejects selected private/reserved address ranges, credentials, nonstandard ports, and unsafe redirects. HTML/plain-text only; 1 MiB response and 20,000-character output limit with a truncation flag.", InputSchema: llm.MustSchema(`{"type":"object","properties":{"url":{"type":"string","description":"Public HTTP or HTTPS URL"}},"required":["url"],"additionalProperties":false}`), Run: llm.RunJSON(tools.fetch)}
 }
