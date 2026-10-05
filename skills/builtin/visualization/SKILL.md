@@ -56,4 +56,4 @@ try {
 </html>
 ```
 
-The hosted renderer supports Vega and Vega-Lite by inspecting the specification schema. It enables local PNG/SVG export but disables source, compiled-spec, and external-editor actions.
+The hosted renderer supports Vega and Vega-Lite by inspecting the specification schema. It uses Vega's CSP-compatible AST interpreter, enables local PNG/SVG export, and disables source, compiled-spec, and external-editor actions.

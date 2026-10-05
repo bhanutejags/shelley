@@ -18,8 +18,22 @@ export async function render({
     throw new Error('render: renderer must be "svg" or "canvas"');
   }
 
-  return embed(mount, spec, {
+  // vega-embed styles its target as inline-block. Rendering directly into a
+  // width:100% mount therefore creates a circular "container" measurement and
+  // can collapse responsive charts to their padding width. Keep the caller's
+  // mount as the stable full-width container and embed into an explicit 100%
+  // child.
+  mount.replaceChildren();
+  const target = document.createElement("div");
+  target.style.width = "100%";
+  mount.appendChild(target);
+
+  return embed(target, spec, {
     renderer,
+    // Use Vega's AST interpreter instead of Function/eval compilation. This
+    // keeps charts compatible with the microfrontend CSP, which deliberately
+    // omits script-src 'unsafe-eval'.
+    ast: true,
     actions: actions
       ? {
           export: true,
