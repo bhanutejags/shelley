@@ -2,6 +2,8 @@ package claudetool
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,7 +34,9 @@ Use for charts, HTML demos, SVGs, and interactive widgets. Use normal messages
 for text or simple data.
 
 HTML may include inline scripts/styles and CDN resources. Bundle small local
-assets with files; use libraries for hosted runtimes such as Excalidraw.`
+assets with files; use libraries for hosted runtimes such as Excalidraw and Vega.
+For an interactive microfrontend that needs a narrow host bridge, use the
+microfrontend option with explicit context and capabilities.`
 
 	outputIframeInputSchema = `
 {
@@ -56,8 +60,24 @@ assets with files; use libraries for hosted runtimes such as Excalidraw.`
     },
     "libraries": {
       "type": "array",
-      "description": "Names of shelley-hosted runtime libraries to load. The host page fetches each library and streams it into the iframe via postMessage; the bytes do NOT go into the conversation. The page can await window.__LIBS__ to get a {name: module} map. Allowed: \"excalidraw\".",
+      "description": "Names of shelley-hosted runtime libraries to load. The host page fetches each library and streams it into the iframe via postMessage; the bytes do NOT go into the conversation. The page can await window.__LIBS__ to get a {name: module} map. Allowed: \"excalidraw\", \"vega\".",
       "items": { "type": "string" }
+    },
+    "microfrontend": {
+      "type": "object",
+      "description": "Optional constrained host bridge. Context is an explicit immutable JSON object stored with the conversation. Capabilities are allowlisted host actions; currently only chat.appendDraft, which appends text to the visible composer without sending it. Enabling this mode also applies a restrictive CSP that blocks network requests, forms, frames, and plugins.",
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "type": "object",
+          "description": "Small explicit JSON context for window.__SHELLEY__.context. Do not include secrets or unnecessary conversation data.",
+          "additionalProperties": true
+        },
+        "capabilities": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["chat.appendDraft"] }
+        }
+      }
     }
   }
 }
@@ -65,11 +85,18 @@ assets with files; use libraries for hosted runtimes such as Excalidraw.`
 )
 
 // allowedLibraries maps library names (as the agent specifies them) to the
-// /static/ path the host React component fetches. Adding a new entry is the
+// /static/ path the host Vue component fetches. Adding a new entry is the
 // only change needed to expose another runtime to output_iframe skills.
 var allowedLibraries = map[string]string{
 	"excalidraw": "/static/excalidraw/skill.js",
+	"vega":       "/static/vega/skill.js",
 }
+
+var allowedMicrofrontendCapabilities = map[string]bool{
+	"chat.appendDraft": true,
+}
+
+const maxMicrofrontendContextBytes = 64 << 10
 
 // EmbeddedFile represents a file bundled with the HTML.
 type EmbeddedFile struct {
@@ -81,13 +108,14 @@ type EmbeddedFile struct {
 
 // OutputIframeDisplay is the data passed to the UI for rendering.
 type OutputIframeDisplay struct {
-	Type     string         `json:"type"`
-	HTML     string         `json:"html"`
-	Title    string         `json:"title,omitempty"`
-	Filename string         `json:"filename,omitempty"`
-	Files    []EmbeddedFile `json:"files,omitempty"`
+	Type          string               `json:"type"`
+	HTML          string               `json:"html"`
+	Title         string               `json:"title,omitempty"`
+	Filename      string               `json:"filename,omitempty"`
+	Files         []EmbeddedFile       `json:"files,omitempty"`
+	Microfrontend *MicrofrontendConfig `json:"microfrontend,omitempty"`
 	// Libraries are names of shelley-hosted /static/ runtimes the iframe
-	// should preload. The host page (OutputIframeTool.tsx) fetches each
+	// should preload. The host page (OutputIframeTool.vue) fetches each
 	// library from same-origin and postMessages it in — so the bytes are
 	// not stored in the conversation. Resolved into window.__LIBS__ inside
 	// the iframe by an injected bootstrap script.
@@ -239,11 +267,43 @@ func escapeJSString(s string) string {
 	return b.String()
 }
 
+type MicrofrontendConfig struct {
+	Context      map[string]any `json:"context,omitempty"`
+	Capabilities []string       `json:"capabilities,omitempty"`
+}
+
 type outputIframeInput struct {
-	Path      string            `json:"path"`
-	Title     string            `json:"title"`
-	Files     map[string]string `json:"files"`
-	Libraries []string          `json:"libraries"`
+	Path          string               `json:"path"`
+	Title         string               `json:"title"`
+	Files         map[string]string    `json:"files"`
+	Libraries     []string             `json:"libraries"`
+	Microfrontend *MicrofrontendConfig `json:"microfrontend"`
+}
+
+func validateMicrofrontend(config *MicrofrontendConfig) (*MicrofrontendConfig, error) {
+	if config == nil {
+		return nil, nil
+	}
+	contextJSON, err := json.Marshal(config.Context)
+	if err != nil {
+		return nil, err
+	}
+	if len(contextJSON) > maxMicrofrontendContextBytes {
+		return nil, fmt.Errorf("context exceeds %d bytes", maxMicrofrontendContextBytes)
+	}
+
+	out := &MicrofrontendConfig{Context: config.Context}
+	seen := make(map[string]bool)
+	for _, capability := range config.Capabilities {
+		if !allowedMicrofrontendCapabilities[capability] {
+			return nil, fmt.Errorf("unknown capability %q", capability)
+		}
+		if !seen[capability] {
+			seen[capability] = true
+			out.Capabilities = append(out.Capabilities, capability)
+		}
+	}
+	return out, nil
 }
 
 func (t *OutputIframeTool) run(ctx context.Context, input outputIframeInput) llm.ToolOut {
@@ -315,13 +375,19 @@ func (t *OutputIframeTool) run(ctx context.Context, input outputIframeInput) llm
 		}
 	}
 
+	microfrontend, err := validateMicrofrontend(input.Microfrontend)
+	if err != nil {
+		return llm.ErrorfToolOut("invalid microfrontend: %v", err)
+	}
+
 	display := OutputIframeDisplay{
-		Type:      "output_iframe",
-		HTML:      html,
-		Title:     input.Title,
-		Filename:  filepath.Base(input.Path),
-		Files:     embeddedFiles,
-		Libraries: libs,
+		Type:          "output_iframe",
+		HTML:          html,
+		Title:         input.Title,
+		Filename:      filepath.Base(input.Path),
+		Files:         embeddedFiles,
+		Libraries:     libs,
+		Microfrontend: microfrontend,
 	}
 
 	return llm.ToolOut{

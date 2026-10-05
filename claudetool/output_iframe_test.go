@@ -260,6 +260,24 @@ func TestOutputIframeLibraries(t *testing.T) {
 		}
 	})
 
+	t.Run("vega library is recorded", func(t *testing.T) {
+		in, _ := json.Marshal(map[string]any{
+			"path":      "test.html",
+			"libraries": []string{"vega"},
+		})
+		res := tool.Tool().Run(t.Context(), in)
+		if res.Error != nil {
+			t.Fatalf("unexpected error: %v", res.Error)
+		}
+		disp := res.Display.(OutputIframeDisplay)
+		if len(disp.Libraries) != 1 || disp.Libraries[0] != "vega" {
+			t.Errorf("expected libraries=[vega], got %v", disp.Libraries)
+		}
+		if strings.Contains(disp.HTML, "vegaEmbed") {
+			t.Error("Vega runtime bytes leaked into HTML")
+		}
+	})
+
 	t.Run("unknown library rejected", func(t *testing.T) {
 		in, _ := json.Marshal(map[string]any{
 			"path":      "test.html",
@@ -283,6 +301,66 @@ func TestOutputIframeLibraries(t *testing.T) {
 		disp := res.Display.(OutputIframeDisplay)
 		if len(disp.Libraries) != 1 {
 			t.Errorf("expected dedupe to 1, got %v", disp.Libraries)
+		}
+	})
+}
+
+func TestOutputIframeMicrofrontend(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "app.html"), []byte("<html><body></body></html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wd := &MutableWorkingDir{}
+	wd.Set(tmpDir)
+	tool := &OutputIframeTool{WorkingDir: wd}
+
+	t.Run("context and allowed capability are recorded", func(t *testing.T) {
+		in, _ := json.Marshal(map[string]any{
+			"path": "app.html",
+			"microfrontend": map[string]any{
+				"context":      map[string]any{"items": []string{"a", "b"}},
+				"capabilities": []string{"chat.appendDraft", "chat.appendDraft"},
+			},
+		})
+		res := tool.Tool().Run(t.Context(), in)
+		if res.Error != nil {
+			t.Fatalf("unexpected error: %v", res.Error)
+		}
+		display := res.Display.(OutputIframeDisplay)
+		if display.Microfrontend == nil {
+			t.Fatal("microfrontend config missing")
+		}
+		if len(display.Microfrontend.Capabilities) != 1 || display.Microfrontend.Capabilities[0] != "chat.appendDraft" {
+			t.Fatalf("capabilities = %v", display.Microfrontend.Capabilities)
+		}
+		if got := display.Microfrontend.Context["items"].([]any); len(got) != 2 {
+			t.Fatalf("context items = %v", got)
+		}
+	})
+
+	t.Run("unknown capability rejected", func(t *testing.T) {
+		in, _ := json.Marshal(map[string]any{
+			"path": "app.html",
+			"microfrontend": map[string]any{
+				"capabilities": []string{"shell.run"},
+			},
+		})
+		res := tool.Tool().Run(t.Context(), in)
+		if res.Error == nil {
+			t.Fatal("expected unknown capability error")
+		}
+	})
+
+	t.Run("oversized context rejected", func(t *testing.T) {
+		in, _ := json.Marshal(map[string]any{
+			"path": "app.html",
+			"microfrontend": map[string]any{
+				"context": map[string]any{"large": strings.Repeat("x", maxMicrofrontendContextBytes)},
+			},
+		})
+		res := tool.Tool().Run(t.Context(), in)
+		if res.Error == nil {
+			t.Fatal("expected oversized context error")
 		}
 	})
 }

@@ -1,6 +1,6 @@
 <!-- Vue port of components/OutputIframeTool.tsx. Renders HTML output in a
-     sandboxed iframe with postMessage-based library streaming (excalidraw
-     skill). jszip is framework-agnostic and reused directly.
+     sandboxed iframe with postMessage-based hosted-library streaming and a
+     constrained opt-in microfrontend bridge. jszip is framework-agnostic.
 
      Preserves: .output-iframe-tool, .output-iframe-tool-header,
      .output-iframe-tool-summary, .output-iframe-tool-emoji,
@@ -43,6 +43,7 @@
             </svg>
           </button>
           <button
+            v-if="!usesMicrofrontend"
             v-tooltip.top="'Open in new tab'"
             class="output-iframe-tool-open-btn"
             aria-label="Open in new tab"
@@ -130,6 +131,11 @@ interface EmbeddedFile {
   type: string;
 }
 
+interface MicrofrontendConfig {
+  context?: Record<string, unknown>;
+  capabilities?: string[];
+}
+
 const props = defineProps<{
   toolInput?: unknown;
   isRunning?: boolean;
@@ -175,6 +181,7 @@ const MAX_HEIGHT = 600;
 // /static/ paths the parent fetches for each named library.
 const LIBRARY_PATHS: Record<string, string> = {
   excalidraw: "/static/excalidraw/skill.js",
+  vega: "/static/vega/skill.js",
 };
 
 // Remove injected scripts/styles from HTML to get the original version for download
@@ -215,6 +222,7 @@ const displayDataComputed = computed(() => {
       filename?: string;
       files?: EmbeddedFile[];
       libraries?: string[];
+      microfrontend?: MicrofrontendConfig;
     };
     return {
       html: typeof d.html === "string" ? d.html : undefined,
@@ -222,6 +230,8 @@ const displayDataComputed = computed(() => {
       filename: typeof d.filename === "string" ? d.filename : undefined,
       files: Array.isArray(d.files) ? d.files : undefined,
       libraries: Array.isArray(d.libraries) ? d.libraries : undefined,
+      microfrontend:
+        d.microfrontend && typeof d.microfrontend === "object" ? d.microfrontend : undefined,
     };
   }
   // Fall back to toolInput
@@ -244,6 +254,7 @@ const displayDataComputed = computed(() => {
     filename: undefined as string | undefined,
     files: undefined as EmbeddedFile[] | undefined,
     libraries: undefined as string[] | undefined,
+    microfrontend: undefined as MicrofrontendConfig | undefined,
   };
 });
 
@@ -252,8 +263,10 @@ const html = computed(() => displayDataComputed.value.html);
 const filename = computed(() => displayDataComputed.value.filename || "output.html");
 const files = computed(() => displayDataComputed.value.files || []);
 const libraries = computed(() => displayDataComputed.value.libraries || []);
+const microfrontend = computed(() => displayDataComputed.value.microfrontend);
 const hasMultipleFiles = computed(() => files.value.length > 0);
 const usesLibraries = computed(() => libraries.value.length > 0);
+const usesMicrofrontend = computed(() => !!microfrontend.value);
 
 // Bootstrap script for library loading via postMessage
 const libsBootstrapScript = computed(() => {
@@ -282,10 +295,77 @@ const libsBootstrapScript = computed(() => {
 <\/script>`;
 });
 
+const MICROFRONTEND_CSP = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' blob:; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; media-src data: blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'">`;
+
+function inlineScriptJSON(value: unknown): string {
+  return JSON.stringify(value)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/&/g, "\\u0026")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
+const microfrontendBootstrapScript = computed(() => {
+  const config = microfrontend.value;
+  if (!config) return "";
+  const context = inlineScriptJSON(config.context || {});
+  const capabilities = inlineScriptJSON(config.capabilities || []);
+  return `${MICROFRONTEND_CSP}<script data-microfrontend-bootstrap="v1">
+(function(){
+  var capabilities = Object.freeze(${capabilities});
+  function deepFreeze(value) {
+    if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+    Object.freeze(value);
+    Object.keys(value).forEach(function(key){ deepFreeze(value[key]); });
+    return value;
+  }
+  var context = deepFreeze(${context});
+  var pending = new Map();
+  var sequence = 0;
+  function request(method, params) {
+    if (capabilities.indexOf(method) === -1) {
+      return Promise.reject(new Error('Capability not granted: ' + method));
+    }
+    var id = 'mf-' + (++sequence);
+    return new Promise(function(resolve, reject){
+      var timer = setTimeout(function(){
+        pending.delete(id);
+        reject(new Error('Shelley bridge request timed out'));
+      }, 10000);
+      pending.set(id, { resolve: resolve, reject: reject, timer: timer });
+      window.parent.postMessage({
+        type: 'shelley-microfrontend-request',
+        version: 1,
+        id: id,
+        method: method,
+        params: params || {}
+      }, '*');
+    });
+  }
+  window.addEventListener('message', function(event){
+    if (event.source !== window.parent || !event.data || event.data.type !== 'shelley-microfrontend-response') return;
+    var item = pending.get(event.data.id);
+    if (!item) return;
+    pending.delete(event.data.id);
+    clearTimeout(item.timer);
+    if (event.data.ok) item.resolve(event.data.result);
+    else item.reject(new Error(event.data.error || 'Shelley bridge request failed'));
+  });
+  window.__SHELLEY__ = Object.freeze({
+    version: 1,
+    context: context,
+    capabilities: capabilities,
+    request: request
+  });
+})();
+<\/script>`;
+});
+
 const htmlWithHeightReporter = computed(() => {
   if (!html.value) return undefined;
   let out = html.value;
-  const headInject = libsBootstrapScript.value;
+  const headInject = microfrontendBootstrapScript.value + libsBootstrapScript.value;
   if (out.includes("<head>")) {
     out = out.replace("<head>", "<head>" + headInject);
   } else {
@@ -299,17 +379,67 @@ const htmlWithHeightReporter = computed(() => {
   return out;
 });
 
-// Listen for height messages from iframe
+function replyToMicrofrontend(
+  id: string,
+  response: { ok: true; result?: unknown } | { ok: false; error: string },
+) {
+  iframeRef.value?.contentWindow?.postMessage(
+    { type: "shelley-microfrontend-response", id, ...response },
+    "*",
+  );
+}
+
+function appendComposerDraft(text: string): void {
+  const input = document.querySelector<HTMLTextAreaElement>('[data-testid="message-input"]');
+  if (!input) throw new Error("The message composer is unavailable");
+  const setter = Object.getOwnPropertyDescriptor(
+    window.HTMLTextAreaElement.prototype,
+    "value",
+  )?.set;
+  if (!setter) throw new Error("The message composer cannot be updated");
+  const next = input.value.trimEnd() ? `${input.value.trimEnd()}\n\n${text}` : text;
+  setter.call(input, next);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  input.focus();
+}
+
+// Listen for height reports and constrained microfrontend requests.
 function handleMessage(event: MessageEvent) {
-  if (
-    event.data &&
-    typeof event.data === "object" &&
-    event.data.type === "iframe-height" &&
-    typeof event.data.height === "number"
-  ) {
-    if (iframeRef.value && event.source === iframeRef.value.contentWindow) {
-      const newHeight = Math.min(Math.max(event.data.height, MIN_HEIGHT), MAX_HEIGHT);
-      iframeHeight.value = newHeight;
+  if (!iframeRef.value || event.source !== iframeRef.value.contentWindow) return;
+  if (!event.data || typeof event.data !== "object") return;
+
+  if (event.data.type === "iframe-height" && typeof event.data.height === "number") {
+    const newHeight = Math.min(Math.max(event.data.height, MIN_HEIGHT), MAX_HEIGHT);
+    iframeHeight.value = newHeight;
+    return;
+  }
+
+  if (event.data.type !== "shelley-microfrontend-request") return;
+  const id = typeof event.data.id === "string" ? event.data.id : "";
+  const method = typeof event.data.method === "string" ? event.data.method : "";
+  if (!id || !microfrontend.value?.capabilities?.includes(method)) {
+    if (id) replyToMicrofrontend(id, { ok: false, error: "Capability not granted" });
+    return;
+  }
+
+  if (method === "chat.appendDraft") {
+    const text = event.data.params?.text;
+    if (typeof text !== "string" || !text.trim()) {
+      replyToMicrofrontend(id, { ok: false, error: "text must be a non-empty string" });
+      return;
+    }
+    if (new TextEncoder().encode(text).length > 16 * 1024) {
+      replyToMicrofrontend(id, { ok: false, error: "text exceeds 16384 bytes" });
+      return;
+    }
+    try {
+      appendComposerDraft(text);
+      replyToMicrofrontend(id, { ok: true, result: { drafted: true } });
+    } catch (error) {
+      replyToMicrofrontend(id, {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 }

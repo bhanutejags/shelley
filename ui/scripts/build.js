@@ -213,6 +213,20 @@ async function build() {
       },
     });
 
+    // /static/vega/skill.js: self-contained Vega + Vega-Lite + vega-embed
+    // runtime. Like Excalidraw, the host streams it into output_iframe via
+    // postMessage so chart runtime bytes never enter the conversation.
+    log("Building /static/vega bundle...");
+    fs.mkdirSync("dist/static/vega", { recursive: true });
+    await esbuild.build({
+      entryPoints: ["src/vega-skill.js"],
+      bundle: true,
+      outfile: "dist/static/vega/skill.js",
+      format: "esm",
+      minify: isProd,
+      sourcemap: false,
+    });
+
     // Copy static files
     fs.copyFileSync("src/index.html", "dist/index.html");
     const btwStylesImport = '@import "./btw.css";';
@@ -279,6 +293,7 @@ async function build() {
       "main.js",
       "main.css",
       "static/excalidraw/skill.js",
+      "static/vega/skill.js",
       "SymbolsNerdFontMono.woff2",
     ];
     const checksums = {};
